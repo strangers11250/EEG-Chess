@@ -330,6 +330,17 @@ def handle_click(board: chess.Board, mouse_pos, selected_square):
         return None, [], False
 
     move = chess.Move(selected_square, clicked_square)
+
+    # Handle pawn promotion automatically to Queen
+    piece = board.piece_at(selected_square)
+    if piece is not None and piece.piece_type == chess.PAWN:
+        target_rank = chess.square_rank(clicked_square)
+
+        # White promotes on rank 7, Black on rank 0
+        if (piece.color == chess.WHITE and target_rank == 7) or \
+           (piece.color == chess.BLACK and target_rank == 0):
+            move = chess.Move(selected_square, clicked_square, promotion=chess.QUEEN)
+
     if move in board.legal_moves:
         board.push(move)
         return None, [], True
@@ -395,4 +406,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
