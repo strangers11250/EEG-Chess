@@ -3,7 +3,7 @@ An EEG‑based chess game exploring brain–computer interfaces for hands‑free
 
 ## Catalog
 - **Abstract**
-- **Author**
+- **Authors**
 - **Schedule**
 - **Development Notes**
 
@@ -15,9 +15,9 @@ Beyond building a playable prototype, the project aims to:
 - **Visualize** EEG activity during gameplay to give users insight into their brain signals.
 - **Document** practical challenges of building an end‑to‑end BCI system (signal quality, artifacts, UX, and calibration).
 
-### Author (add your name plz)
-- **Name**: *Group #24* James Wang, 
-- **Contact**: ziw124@ucsd.edu  
+### Authors (add your name plz)
+- **Name**: *Group #24* James Wang, Aidan Ho
+- **Contact**: ziw124@ucsd.edu, aiho@ucsd.edu  
 - **Course**: COGS 189
 
 ### Schedule
