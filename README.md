@@ -16,8 +16,8 @@ Beyond building a playable prototype, the project aims to:
 - **Document** practical challenges of building an end‑to‑end BCI system (signal quality, artifacts, UX, and calibration).
 
 ### Authors (add your name plz)
-- **Name**: *Group #24* James Wang, Aidan Ho
-- **Contact**: ziw124@ucsd.edu, aiho@ucsd.edu  
+- **Name**: *Group #24* James Wang, Aidan Ho, Farhin Zaman
+- **Contact**: ziw124@ucsd.edu, aiho@ucsd.edu, fzaman@ucsd.edu  
 - **Course**: COGS 189
 
 ### Schedule
