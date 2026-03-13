@@ -17,7 +17,7 @@ Beyond building a playable prototype, the project aims to:
 
 ### Authors (add your name plz)
 - **Name**: *Group #24* James Wang, Aidan Ho, Farhin Zaman
-- **Contact**: ziw124@ucsd.edu, aiho@ucsd.edu, fzaman@ucsd.edu  
+- **Contact**: ziw124@ucsd.edu, aiho@ucsd.edu, fzaman@ucsd.edu , mammar@ucsd.edu
 - **Course**: COGS 189
 
 ### Schedule
