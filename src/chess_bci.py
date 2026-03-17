@@ -65,13 +65,15 @@ STIM_TYPE = 'alternating'  # 'alternating' for SSVEP
 RUN_ID = 1
 SUBJECT = 1
 SESSION = 1
+CALIBRATION_MODE = True
+AUTO_SSVEP_ENABLED = True
+CALIBRATION_CUE_LEAD_TIME = 0.7  # Seconds cue is shown before SSVEP starts
 SAVE_DIR = f'data/chess_bci_{STIM_TYPE}-vep_32-class_{STIM_DURATION}s-/sub-{SUBJECT:02d}/ses-{SESSION:02d}/'
 SAVE_FILE_EEG = SAVE_DIR + f'eeg_{N_PER_CLASS}-per-class_run-{RUN_ID}.npy'
-SAVE_FILE_AUX = SAVE_DIR + f'aux_{N_PER_CLASS}-per-class_run-{RUN_ID}.npy'
 SAVE_FILE_TIMESTAMP = SAVE_DIR + f'timestamp_{N_PER_CLASS}-per-class_run-{RUN_ID}.npy'
 SAVE_FILE_METADATA = SAVE_DIR + f'metadata_{N_PER_CLASS}-per-class_run-{RUN_ID}.npy'
 SAVE_FILE_EEG_TRIALS = SAVE_DIR + f'eeg-trials_{N_PER_CLASS}-per-class_run-{RUN_ID}.npy'
-SAVE_FILE_AUX_TRIALS = SAVE_DIR + f'aux-trials_{N_PER_CLASS}-per-class_run-{RUN_ID}.npy'
+SAVE_FILE_LABELS = SAVE_DIR + f'labels_{N_PER_CLASS}-per-class_run-{RUN_ID}.npy'
 MODEL_FILE_PATH = 'cache/FBTRCA_model.pkl'
 
 # --- Basic Chess Configuration ---
@@ -342,7 +344,9 @@ def reset_game(board: chess.Board) -> tuple:
 
 
 def draw_board(screen, board: chess.Board, font, status_font, selected_square, legal_targets,
-               ssvep_active=False, stimulus_frames=None, square_frequencies=None):
+               ssvep_active=False, stimulus_frames=None, square_frequencies=None,
+               ssvep_flicker_squares=None,
+               calibration_cue_squares=None):
     """Draw the chess board with optional SSVEP flickering."""
     width, height = screen.get_size()
     
@@ -368,7 +372,11 @@ def draw_board(screen, board: chess.Board, font, status_font, selected_square, l
             base_color = LIGHT_COLOR if (file + rank) % 2 == 0 else DARK_COLOR
             
             # Apply SSVEP flickering if active
-            if ssvep_active and stimulus_frames is not None and square_frequencies is not None:
+            allow_flicker = True
+            if ssvep_flicker_squares is not None:
+                allow_flicker = square_idx in ssvep_flicker_squares
+
+            if allow_flicker and ssvep_active and stimulus_frames is not None and square_frequencies is not None:
                 brightness = get_square_brightness(square_idx, frame_idx, stimulus_frames, square_frequencies)
                 # Convert brightness (-1 to 1) to color multiplier (0.3 to 1.0)
                 # This keeps squares visible but allows flickering
@@ -398,6 +406,19 @@ def draw_board(screen, board: chess.Board, font, status_font, selected_square, l
             BOARD_OFFSET_Y + r * SQUARE_SIZE + SQUARE_SIZE // 2,
         )
         pygame.draw.circle(screen, MOVE_COLOR, center, SQUARE_SIZE // 6)
+
+    # Calibration cue highlight (e.g., a cued target move).
+    if calibration_cue_squares:
+        for sq in calibration_cue_squares:
+            f, r = square_to_coord(sq)
+            rect = pygame.Rect(
+                BOARD_OFFSET_X + f * SQUARE_SIZE,
+                BOARD_OFFSET_Y + r * SQUARE_SIZE,
+                SQUARE_SIZE,
+                SQUARE_SIZE,
+            )
+            # Bright, thick border to be clearly visible.
+            pygame.draw.rect(screen, (255, 0, 0), rect, max(4, SQUARE_SIZE // 8))
     
     # Draw pieces
     for square, piece in board.piece_map().items():
@@ -529,9 +550,8 @@ if BCI_AVAILABLE:
             data_in = board.get_board_data()
             timestamp_in = data_in[board.get_timestamp_channel(CYTON_BOARD_ID)]
             eeg_in = data_in[board.get_eeg_channels(CYTON_BOARD_ID)]
-            aux_in = data_in[board.get_analog_channels(CYTON_BOARD_ID)]
             if len(timestamp_in) > 0:
-                queue_in.put((eeg_in, aux_in, timestamp_in))
+                queue_in.put((eeg_in, timestamp_in))
             time.sleep(0.1)
 
 
@@ -557,8 +577,12 @@ def main():
     bci_thread = None
     stop_event = None
     eeg_data = []
-    aux_data = []
     timestamps = []
+    eeg_trials = []
+    trial_labels = []
+    current_trial_eeg_chunks = []
+    current_trial_ts_chunks = []
+    trial_recording_active = False
     
     if CYTON_IN and BCI_AVAILABLE:
         try:
@@ -588,12 +612,53 @@ def main():
             CYTON_IN = False
     
     running = True
-    ssvep_toggle_key_pressed = False
 
-    auto_ssvep_enabled = True
+    auto_ssvep_enabled = AUTO_SSVEP_ENABLED
     ssvep_phase = "rest"  # "rest" | "active"
     ssvep_rest_start_time = time.time()
     SSVEP_ACTIVE = False
+
+    calibration_mode = CALIBRATION_MODE
+    calibration_cue_move: Optional[chess.Move] = None
+    calibration_cue_squares = None  # list[chess.Square] | None
+    calibration_cued_target_square: Optional[chess.Square] = None
+
+    # SSVEP selection state machine:
+    # - "piece": flicker only squares containing a selectable piece (current player + has legal move)
+    # - "move": flicker only legal destination squares for the selected piece
+    ssvep_select_stage = "piece"  # "piece" | "move"
+    ssvep_selected_from_square = None
+    ssvep_flicker_squares = None  # None means flicker all squares
+
+    def get_selectable_piece_squares(b: chess.Board):
+        from_sqs = set()
+        for m in b.legal_moves:
+            from_sqs.add(m.from_square)
+        return sorted(from_sqs)
+
+    def get_legal_target_squares_for_piece(b: chess.Board, from_sq: chess.Square):
+        return sorted({m.to_square for m in b.legal_moves if m.from_square == from_sq})
+
+    def pick_ssvep_choice(valid_squares):
+        """Simulated SSVEP decision: choose a valid square.
+
+        This is intentionally pluggable: replace this with an EEG classifier output
+        (frequency class -> square) when available.
+        """
+        if not valid_squares:
+            return None
+        return random.choice(valid_squares)
+
+    def make_move_with_promotion(b: chess.Board, from_sq: chess.Square, to_sq: chess.Square) -> Optional[chess.Move]:
+        move = chess.Move(from_sq, to_sq)
+        piece = b.piece_at(from_sq)
+        if piece is not None and piece.piece_type == chess.PAWN:
+            target_rank = chess.square_rank(to_sq)
+            if (piece.color == chess.WHITE and target_rank == 7) or (piece.color == chess.BLACK and target_rank == 0):
+                move = chess.Move(from_sq, to_sq, promotion=chess.QUEEN)
+        if move in b.legal_moves:
+            return move
+        return None
     
     while running:
         dt = clock.tick(60) / 1000.0  # Delta time in seconds
@@ -604,22 +669,6 @@ def main():
             elif event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_ESCAPE:
                     running = False
-                elif event.key == pygame.K_s:
-                    # Pause/resume the automatic SSVEP cycle with 'S' key
-                    if not ssvep_toggle_key_pressed:
-                        auto_ssvep_enabled = not auto_ssvep_enabled
-                        if auto_ssvep_enabled:
-                            ssvep_phase = "rest"
-                            ssvep_rest_start_time = time.time()
-                            SSVEP_ACTIVE = False
-                            print("Auto SSVEP cycle enabled")
-                        else:
-                            SSVEP_ACTIVE = False
-                            print("Auto SSVEP cycle paused")
-                        ssvep_toggle_key_pressed = True
-            elif event.type == pygame.KEYUP:
-                if event.key == pygame.K_s:
-                    ssvep_toggle_key_pressed = False
             elif event.type == pygame.VIDEORESIZE:
                 screen = pygame.display.set_mode(event.size, pygame.RESIZABLE)
                 update_layout(event.w, event.h)
@@ -648,7 +697,52 @@ def main():
             if ssvep_phase == "rest":
                 rest_elapsed = current_time - ssvep_rest_start_time
                 rest_remaining_s = max(0, int(math.ceil(COUNTDOWN_TIME - rest_elapsed)))
+
+                # In calibration mode, show the cue box slightly *before* SSVEP starts.
+                if (
+                    calibration_mode
+                    and calibration_cue_move is None
+                    and not board.is_game_over()
+                    and not (BLACK_IS_AI and board.turn == chess.BLACK)
+                    and rest_elapsed >= max(0.0, COUNTDOWN_TIME - CALIBRATION_CUE_LEAD_TIME)
+                ):
+                    legal_moves = list(board.legal_moves)
+                    calibration_cue_move = random.choice(legal_moves) if legal_moves else None
+                    if calibration_cue_move is not None:
+                        calibration_cue_squares = [calibration_cue_move.from_square, calibration_cue_move.to_square]
+                        calibration_cued_target_square = calibration_cue_move.to_square
+                        # For calibration we flicker all squares (full-class stimulus), but cue the target.
+                        ssvep_flicker_squares = None
+                    else:
+                        calibration_cue_squares = None
+                        calibration_cued_target_square = None
+
                 if rest_elapsed >= COUNTDOWN_TIME:
+                    # When not in calibration, ensure cue state is cleared.
+                    if not calibration_mode:
+                        calibration_cue_move = None
+                        calibration_cue_squares = None
+                        calibration_cued_target_square = None
+
+                    # Update flicker mask right before activating a new SSVEP trial.
+                    if (
+                        not calibration_mode
+                        and not board.is_game_over()
+                        and not (BLACK_IS_AI and board.turn == chess.BLACK)
+                    ):
+                        if ssvep_select_stage == "piece":
+                            ssvep_flicker_squares = set(get_selectable_piece_squares(board))
+                        else:
+                            if ssvep_selected_from_square is not None:
+                                ssvep_flicker_squares = set(
+                                    get_legal_target_squares_for_piece(board, ssvep_selected_from_square)
+                                )
+                            else:
+                                ssvep_select_stage = "piece"
+                                ssvep_flicker_squares = set(get_selectable_piece_squares(board))
+                    else:
+                        ssvep_flicker_squares = None
+
                     SSVEP_ACTIVE = True
                     SSVEP_START_TIME = current_time
                     ssvep_phase = "active"
@@ -659,6 +753,59 @@ def main():
                 active_elapsed = current_time - SSVEP_START_TIME
                 if active_elapsed >= STIM_DURATION:
                     SSVEP_ACTIVE = False
+
+                    if calibration_mode:
+                        # Finish trial recording and store labeled trial.
+                        if trial_recording_active and calibration_cued_target_square is not None:
+                            if current_trial_eeg_chunks and current_trial_ts_chunks:
+                                trial_eeg = np.concatenate(current_trial_eeg_chunks, axis=1)
+                                trial_ts = np.concatenate(current_trial_ts_chunks, axis=0)
+                                eeg_trials.append(trial_eeg)
+                                # Label by frequency class index (what your SSVEP classifier typically predicts).
+                                trial_labels.append(square_frequencies[calibration_cued_target_square])
+                                eeg_data.append(trial_eeg)
+                                timestamps.append(trial_ts)
+
+                            # Perform the cued move on the board (so the calibration move is actually played).
+                            if calibration_cue_move is not None and calibration_cue_move in board.legal_moves:
+                                board.push(calibration_cue_move)
+                                selected_square = None
+                                legal_targets = []
+
+                            trial_recording_active = False
+                            current_trial_eeg_chunks = []
+                            current_trial_ts_chunks = []
+                            # Prepare for the next trial's cue.
+                            calibration_cue_move = None
+                            calibration_cue_squares = None
+                            calibration_cued_target_square = None
+                        # Keep cue visible only during calibration mode; next trial will choose a new cue.
+                    else:
+                        # Consume one SSVEP "decision" at end of trial (normal mode).
+                        if (
+                            not board.is_game_over()
+                            and not (BLACK_IS_AI and board.turn == chess.BLACK)
+                            and ssvep_flicker_squares is not None
+                            and len(ssvep_flicker_squares) > 0
+                        ):
+                            choice_sq = pick_ssvep_choice(list(ssvep_flicker_squares))
+                            if ssvep_select_stage == "piece":
+                                if choice_sq is not None and choice_sq in ssvep_flicker_squares:
+                                    ssvep_selected_from_square = choice_sq
+                                    selected_square = choice_sq
+                                    legal_targets = get_legal_target_squares_for_piece(board, choice_sq)
+                                    ssvep_select_stage = "move"
+                            else:
+                                if ssvep_selected_from_square is not None and choice_sq is not None:
+                                    move_obj = make_move_with_promotion(board, ssvep_selected_from_square, choice_sq)
+                                    if move_obj is not None:
+                                        board.push(move_obj)
+                                    # Reset selection state after move attempt (valid or not)
+                                    ssvep_selected_from_square = None
+                                    selected_square = None
+                                    legal_targets = []
+                                    ssvep_select_stage = "piece"
+
                     ssvep_phase = "rest"
                     ssvep_rest_start_time = current_time
         else:
@@ -669,16 +816,19 @@ def main():
         # Collect BCI data if active
         if CYTON_IN and BCI_AVAILABLE and bci_queue is not None:
             while not bci_queue.empty():
-                eeg_in, aux_in, timestamp_in = bci_queue.get()
-                eeg_data.append(eeg_in)
-                aux_data.append(aux_in)
-                timestamps.append(timestamp_in)
+                eeg_in, timestamp_in = bci_queue.get()
+                # Only record when calibration cue is active during the stimulus window.
+                if calibration_mode and trial_recording_active and ssvep_phase == "active":
+                    current_trial_eeg_chunks.append(eeg_in)
+                    current_trial_ts_chunks.append(timestamp_in)
         
         # Draw everything
         screen.fill((0, 0, 0))
         draw_board(screen, board, font, status_font, selected_square, legal_targets,
                   ssvep_active=SSVEP_ACTIVE, stimulus_frames=stimulus_frames,
-                  square_frequencies=square_frequencies)
+                  square_frequencies=square_frequencies,
+                  ssvep_flicker_squares=ssvep_flicker_squares if SSVEP_ACTIVE else None,
+                  calibration_cue_squares=calibration_cue_squares if calibration_mode else None)
         draw_ssvep_status_panel(
             screen,
             status_font,
@@ -699,17 +849,18 @@ def main():
         bci_board.release_session()
         
         # Save data if collected
-        if eeg_data:
+        if eeg_data or eeg_trials:
             os.makedirs(SAVE_DIR, exist_ok=True)
             eeg_combined = np.concatenate(eeg_data, axis=1) if len(eeg_data) > 0 else np.array([])
-            aux_combined = np.concatenate(aux_data, axis=1) if len(aux_data) > 0 else np.array([])
             timestamp_combined = np.concatenate(timestamps, axis=0) if len(timestamps) > 0 else np.array([])
             
             if eeg_combined.size > 0:
                 np.save(os.path.join(SAVE_DIR, 'eeg_data.npy'), eeg_combined)
-                np.save(os.path.join(SAVE_DIR, 'aux_data.npy'), aux_combined)
                 np.save(os.path.join(SAVE_DIR, 'timestamps.npy'), timestamp_combined)
-                print(f"Saved BCI data to {SAVE_DIR}")
+            if eeg_trials:
+                np.save(SAVE_FILE_EEG_TRIALS, np.array(eeg_trials, dtype=object))
+                np.save(SAVE_FILE_LABELS, np.array(trial_labels, dtype=np.int32))
+            print(f"Saved BCI data to {SAVE_DIR}")
     
     pygame.quit()
     sys.exit(0)
