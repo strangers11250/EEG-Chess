@@ -60,7 +60,7 @@ SAMPLING_RATE = 250 if BCI_AVAILABLE else 250
 N_PER_CLASS = 2
 REFRESH_RATE = 60.0  # Monitor refresh rate (adjust to your monitor)
 STIM_DURATION = 1.2  # Duration of each SSVEP trial in seconds
-COUNTDOWN_TIME = 5.0
+COUNTDOWN_TIME = 3.0
 STIM_TYPE = 'alternating'  # 'alternating' for SSVEP
 RUN_ID = 1
 SUBJECT = 1
@@ -421,20 +421,21 @@ def draw_board(screen, board: chess.Board, font, status_font, selected_square, l
             pygame.draw.rect(screen, (255, 0, 0), rect, max(4, SQUARE_SIZE // 8))
     
     # Draw pieces
-    for square, piece in board.piece_map().items():
-        f, r = square_to_coord(square)
-        center_x = BOARD_OFFSET_X + f * SQUARE_SIZE + SQUARE_SIZE // 2
-        center_y = BOARD_OFFSET_Y + r * SQUARE_SIZE + SQUARE_SIZE // 2
-        symbol = piece.symbol()
-        
-        image = PIECE_IMAGES.get(symbol)
-        if image is not None:
-            rect = image.get_rect(center=(center_x, center_y))
-            screen.blit(image, rect)
-        else:
-            text_surface = font.render(piece.unicode_symbol(), True, TEXT_COLOR)
-            text_rect = text_surface.get_rect(center=(center_x, center_y))
-            screen.blit(text_surface, text_rect)
+    if not ssvep_active:
+        for square, piece in board.piece_map().items():
+            f, r = square_to_coord(square)
+            center_x = BOARD_OFFSET_X + f * SQUARE_SIZE + SQUARE_SIZE // 2
+            center_y = BOARD_OFFSET_Y + r * SQUARE_SIZE + SQUARE_SIZE // 2
+            symbol = piece.symbol()
+            
+            image = PIECE_IMAGES.get(symbol)
+            if image is not None:
+                rect = image.get_rect(center=(center_x, center_y))
+                screen.blit(image, rect)
+            else:
+                text_surface = font.render(piece.unicode_symbol(), True, TEXT_COLOR)
+                text_rect = text_surface.get_rect(center=(center_x, center_y))
+                screen.blit(text_surface, text_rect)
     
     # Draw player type indicator
     player_indicator_text = f"Black: {'AI' if BLACK_IS_AI else 'Human'}"
@@ -613,16 +614,13 @@ def main():
     
     running = True
 
-    auto_ssvep_enabled = AUTO_SSVEP_ENABLED
     ssvep_phase = "rest"  # "rest" | "active"
     ssvep_rest_start_time = time.time()
     SSVEP_ACTIVE = False
 
     calibration_mode = CALIBRATION_MODE
-    calibration_cue_move: Optional[chess.Move] = None
     calibration_cue_squares = None  # list[chess.Square] | None
-    calibration_cued_target_square: Optional[chess.Square] = None
-
+    choice_sq = None   # square used for both cue (in calibration) and decision
     # SSVEP selection state machine:
     # - "piece": flicker only squares containing a selectable piece (current player + has legal move)
     # - "move": flicker only legal destination squares for the selected piece
@@ -693,60 +691,52 @@ def main():
         current_time = time.time()
         rest_remaining_s = None
 
-        if auto_ssvep_enabled:
-            if ssvep_phase == "rest":
+        if AUTO_SSVEP_ENABLED:
+            # Do not run SSVEP trials during the black AI's turn.
+            if BLACK_IS_AI and board.turn == chess.BLACK:
+                SSVEP_ACTIVE = False
+                ssvep_phase = "rest"
+                rest_remaining_s = None
+                calibration_cue_squares = None
+                trial_recording_active = False
+            elif ssvep_phase == "rest":
                 rest_elapsed = current_time - ssvep_rest_start_time
                 rest_remaining_s = max(0, int(math.ceil(COUNTDOWN_TIME - rest_elapsed)))
 
-                # In calibration mode, show the cue box slightly *before* SSVEP starts.
+                # Slightly before SSVEP starts, preselect the square that will be used
+                # as the SSVEP "choice" for this trial. In calibration mode, we also
+                # display it as a red highlight; in non-calibration mode we do not.
                 if (
-                    calibration_mode
-                    and calibration_cue_move is None
+                    calibration_cue_squares is None
                     and not board.is_game_over()
                     and not (BLACK_IS_AI and board.turn == chess.BLACK)
                     and rest_elapsed >= max(0.0, COUNTDOWN_TIME - CALIBRATION_CUE_LEAD_TIME)
                 ):
-                    legal_moves = list(board.legal_moves)
-                    calibration_cue_move = random.choice(legal_moves) if legal_moves else None
-                    if calibration_cue_move is not None:
-                        calibration_cue_squares = [calibration_cue_move.from_square, calibration_cue_move.to_square]
-                        calibration_cued_target_square = calibration_cue_move.to_square
-                        # For calibration we flicker all squares (full-class stimulus), but cue the target.
-                        ssvep_flicker_squares = None
+                    if ssvep_select_stage == "piece":
+                        ssvep_flicker_squares = set(get_selectable_piece_squares(board))
                     else:
-                        calibration_cue_squares = None
-                        calibration_cued_target_square = None
+                        ssvep_flicker_squares = set(
+                            get_legal_target_squares_for_piece(board, ssvep_selected_from_square)
+                        )
+                    # Pre-determine the square this trial will use.
+                    choice_sq = pick_ssvep_choice(list(ssvep_flicker_squares)) if ssvep_flicker_squares else None
+                    # Only show the visual cue in calibration mode.
+                    if calibration_mode and choice_sq is not None:
+                        calibration_cue_squares = [choice_sq]
 
                 if rest_elapsed >= COUNTDOWN_TIME:
                     # When not in calibration, ensure cue state is cleared.
                     if not calibration_mode:
-                        calibration_cue_move = None
                         calibration_cue_squares = None
-                        calibration_cued_target_square = None
-
-                    # Update flicker mask right before activating a new SSVEP trial.
-                    if (
-                        not calibration_mode
-                        and not board.is_game_over()
-                        and not (BLACK_IS_AI and board.turn == chess.BLACK)
-                    ):
-                        if ssvep_select_stage == "piece":
-                            ssvep_flicker_squares = set(get_selectable_piece_squares(board))
-                        else:
-                            if ssvep_selected_from_square is not None:
-                                ssvep_flicker_squares = set(
-                                    get_legal_target_squares_for_piece(board, ssvep_selected_from_square)
-                                )
-                            else:
-                                ssvep_select_stage = "piece"
-                                ssvep_flicker_squares = set(get_selectable_piece_squares(board))
-                    else:
-                        ssvep_flicker_squares = None
 
                     SSVEP_ACTIVE = True
                     SSVEP_START_TIME = current_time
                     ssvep_phase = "active"
                     rest_remaining_s = None
+
+                    # Start recording a calibration trial if in calibration mode and a cue is shown.
+                    if calibration_mode and calibration_cue_squares is not None:
+                        trial_recording_active = True
             elif ssvep_phase == "active":
                 if SSVEP_START_TIME is None:
                     SSVEP_START_TIME = current_time
@@ -756,55 +746,66 @@ def main():
 
                     if calibration_mode:
                         # Finish trial recording and store labeled trial.
-                        if trial_recording_active and calibration_cued_target_square is not None:
+                        if trial_recording_active:
                             if current_trial_eeg_chunks and current_trial_ts_chunks:
                                 trial_eeg = np.concatenate(current_trial_eeg_chunks, axis=1)
                                 trial_ts = np.concatenate(current_trial_ts_chunks, axis=0)
                                 eeg_trials.append(trial_eeg)
                                 # Label by frequency class index (what your SSVEP classifier typically predicts).
-                                trial_labels.append(square_frequencies[calibration_cued_target_square])
+                                if choice_sq is not None:
+                                    trial_labels.append(square_frequencies[choice_sq])
                                 eeg_data.append(trial_eeg)
                                 timestamps.append(trial_ts)
-
-                            # Perform the cued move on the board (so the calibration move is actually played).
-                            if calibration_cue_move is not None and calibration_cue_move in board.legal_moves:
-                                board.push(calibration_cue_move)
-                                selected_square = None
-                                legal_targets = []
-
                             trial_recording_active = False
                             current_trial_eeg_chunks = []
                             current_trial_ts_chunks = []
-                            # Prepare for the next trial's cue.
-                            calibration_cue_move = None
-                            calibration_cue_squares = None
-                            calibration_cued_target_square = None
-                        # Keep cue visible only during calibration mode; next trial will choose a new cue.
-                    else:
-                        # Consume one SSVEP "decision" at end of trial (normal mode).
-                        if (
-                            not board.is_game_over()
-                            and not (BLACK_IS_AI and board.turn == chess.BLACK)
-                            and ssvep_flicker_squares is not None
-                            and len(ssvep_flicker_squares) > 0
-                        ):
-                            choice_sq = pick_ssvep_choice(list(ssvep_flicker_squares))
-                            if ssvep_select_stage == "piece":
-                                if choice_sq is not None and choice_sq in ssvep_flicker_squares:
-                                    ssvep_selected_from_square = choice_sq
-                                    selected_square = choice_sq
-                                    legal_targets = get_legal_target_squares_for_piece(board, choice_sq)
-                                    ssvep_select_stage = "move"
+                        # Clear the cue so the next rest phase can choose a new one.
+                        calibration_cue_squares = None
+                    # Consume one SSVEP "decision" at end of trial (normal mode).
+                    if (
+                        not board.is_game_over()
+                        and not (BLACK_IS_AI and board.turn == chess.BLACK)
+                    ):
+                        # Determine which squares are valid choices for this SSVEP decision
+                        if ssvep_select_stage == "piece":
+                            valid_squares = get_selectable_piece_squares(board)
+                        else:
+                            if ssvep_selected_from_square is not None:
+                                valid_squares = get_legal_target_squares_for_piece(
+                                    board, ssvep_selected_from_square
+                                )
                             else:
-                                if ssvep_selected_from_square is not None and choice_sq is not None:
-                                    move_obj = make_move_with_promotion(board, ssvep_selected_from_square, choice_sq)
+                                valid_squares = []
+
+                        valid_squares = list(valid_squares)
+
+                        if valid_squares:
+                            # Ensure the predetermined choice_sq is valid; if not, fall back.
+                            if choice_sq not in valid_squares:
+                                choice_sq = pick_ssvep_choice(valid_squares)
+
+                            if ssvep_select_stage == "piece":
+                                # First stage: choose which piece to move.
+                                ssvep_selected_from_square = choice_sq
+                                selected_square = choice_sq
+                                legal_targets = get_legal_target_squares_for_piece(board, choice_sq)
+                                # Update flicker set to only the legal target squares.
+                                ssvep_flicker_squares = set(legal_targets)
+                                ssvep_select_stage = "move"
+                            else:
+                                # Second stage: choose the destination square for the already selected piece.
+                                if ssvep_selected_from_square is not None:
+                                    move_obj = make_move_with_promotion(
+                                        board, ssvep_selected_from_square, choice_sq
+                                    )
                                     if move_obj is not None:
                                         board.push(move_obj)
-                                    # Reset selection state after move attempt (valid or not)
-                                    ssvep_selected_from_square = None
-                                    selected_square = None
-                                    legal_targets = []
-                                    ssvep_select_stage = "piece"
+                                # Reset selection state after move attempt (valid or not)
+                                ssvep_selected_from_square = None
+                                selected_square = None
+                                legal_targets = []
+                                ssvep_flicker_squares = set(get_selectable_piece_squares(board))
+                                ssvep_select_stage = "piece"
 
                     ssvep_phase = "rest"
                     ssvep_rest_start_time = current_time
@@ -832,7 +833,7 @@ def main():
         draw_ssvep_status_panel(
             screen,
             status_font,
-            auto_ssvep_enabled=auto_ssvep_enabled,
+            auto_ssvep_enabled=AUTO_SSVEP_ENABLED,
             ssvep_phase=ssvep_phase,
             rest_remaining_s=rest_remaining_s if ssvep_phase == "rest" else None,
         )
