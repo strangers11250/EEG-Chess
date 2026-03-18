@@ -2,6 +2,7 @@ import os
 import sys
 import random
 import time
+import serial
 import math
 import numpy as np
 from scipy import signal
@@ -64,7 +65,7 @@ COUNTDOWN_TIME = 3.0
 STIM_TYPE = 'alternating'  # 'alternating' for SSVEP
 RUN_ID = 1
 SUBJECT = 1
-SESSION = 1
+SESSION = 2
 CALIBRATION_MODE = True
 AUTO_SSVEP_ENABLED = True
 CALIBRATION_CUE_LEAD_TIME = 0.7  # Seconds cue is shown before SSVEP starts
@@ -537,7 +538,7 @@ if BCI_AVAILABLE:
                     if 'OpenBCI' in line:
                         openbci_port = port
                 s.close()
-            except (OSError, Serial.SerialException):
+            except (OSError, serial.SerialException):
                 pass
         
         if openbci_port == '':
@@ -586,31 +587,26 @@ def main():
     trial_recording_active = False
     
     if CYTON_IN and BCI_AVAILABLE:
-        try:
-            print(BoardShim.get_board_descr(CYTON_BOARD_ID))
-            params = BrainFlowInputParams()
-            if CYTON_BOARD_ID != 6:
-                params.serial_port = find_openbci_port()
-            elif CYTON_BOARD_ID == 6:
-                params.ip_port = 9000
-            
-            bci_board = BoardShim(CYTON_BOARD_ID, params)
-            bci_board.prepare_session()
-            bci_board.config_board('/0')
-            bci_board.config_board('//')
-            bci_board.config_board(ANALOGUE_MODE)
-            bci_board.start_stream(45000)
-            
-            stop_event = Event()
-            bci_queue = Queue()
-            bci_thread = Thread(target=get_data, args=(bci_queue, stop_event, bci_board))
-            bci_thread.daemon = True
-            bci_thread.start()
-            print("BCI board initialized successfully")
-        except Exception as e:
-            print(f"Failed to initialize BCI board: {e}")
-            print("Continuing without BCI data collection")
-            CYTON_IN = False
+        print(BoardShim.get_board_descr(CYTON_BOARD_ID))
+        params = BrainFlowInputParams()
+        if CYTON_BOARD_ID != 6:
+            params.serial_port = find_openbci_port()
+        elif CYTON_BOARD_ID == 6:
+            params.ip_port = 9000
+        
+        bci_board = BoardShim(CYTON_BOARD_ID, params)
+        bci_board.prepare_session()
+        bci_board.config_board('/0')
+        bci_board.config_board('//')
+        bci_board.config_board(ANALOGUE_MODE)
+        bci_board.start_stream(45000)
+        
+        stop_event = Event()
+        bci_queue = Queue()
+        bci_thread = Thread(target=get_data, args=(bci_queue, stop_event, bci_board))
+        bci_thread.daemon = True
+        bci_thread.start()
+        print("BCI board initialized successfully")
     
     running = True
 
@@ -750,7 +746,6 @@ def main():
                             if current_trial_eeg_chunks and current_trial_ts_chunks:
                                 trial_eeg = np.concatenate(current_trial_eeg_chunks, axis=1)
                                 trial_ts = np.concatenate(current_trial_ts_chunks, axis=0)
-                                eeg_trials.append(trial_eeg)
                                 # Label by frequency class index (what your SSVEP classifier typically predicts).
                                 if choice_sq is not None:
                                     trial_labels.append(square_frequencies[choice_sq])
@@ -850,7 +845,7 @@ def main():
         bci_board.release_session()
         
         # Save data if collected
-        if eeg_data or eeg_trials:
+        if eeg_data:
             os.makedirs(SAVE_DIR, exist_ok=True)
             eeg_combined = np.concatenate(eeg_data, axis=1) if len(eeg_data) > 0 else np.array([])
             timestamp_combined = np.concatenate(timestamps, axis=0) if len(timestamps) > 0 else np.array([])
@@ -858,8 +853,7 @@ def main():
             if eeg_combined.size > 0:
                 np.save(os.path.join(SAVE_DIR, 'eeg_data.npy'), eeg_combined)
                 np.save(os.path.join(SAVE_DIR, 'timestamps.npy'), timestamp_combined)
-            if eeg_trials:
-                np.save(SAVE_FILE_EEG_TRIALS, np.array(eeg_trials, dtype=object))
+            if trial_labels:
                 np.save(SAVE_FILE_LABELS, np.array(trial_labels, dtype=np.int32))
             print(f"Saved BCI data to {SAVE_DIR}")
     
