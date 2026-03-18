@@ -1,3 +1,22 @@
+# ======================
+# BCI / SSVEP SETTINGS
+# ======================
+
+USE_BCI = False  # toggle between mouse vs EEG control
+
+SAMPLING_RATE = 250
+STIM_DURATION = 1.2
+REFRESH_RATE = 60
+
+N_CLASSES = 32
+N_CHANNELS = 8
+
+MODEL_PATH = "cache/FBTRCA_model.pkl"
+
+# Baseline correction
+BASELINE_DURATION = 0.2
+
+
 #Configurations of the chess board
 
 BOARD_SIZE = 8
