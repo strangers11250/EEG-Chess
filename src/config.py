@@ -2,19 +2,41 @@
 # BCI / SSVEP SETTINGS
 # ======================
 
-USE_BCI = False  # toggle between mouse vs EEG control
+FPS = 60
+DEBUG = True
+
+USE_BCI = True  # toggle between mouse vs EEG control
+USE_SIMULATION_BCI = True
 
 SAMPLING_RATE = 250
 STIM_DURATION = 1.2
 REFRESH_RATE = 60
-
-N_CLASSES = 32
-N_CHANNELS = 8
+# Baseline correction
+BASELINE_DURATION = 0.2
+BCI_DECISION_INTERVAL = 1.5
 
 MODEL_PATH = "cache/FBTRCA_model.pkl"
 
-# Baseline correction
-BASELINE_DURATION = 0.2
+N_CLASSES = 32
+N_CHANNELS = 8
+GRID_ROWS = 4
+
+# SSVEP frequency classes: (frequency_hz, phase_offset_pi)
+# Using 32 classes to match the original VEP setup
+# For 64 squares, we'll map 2 squares per class or use all 64 with unique frequencies
+SSVEP_CLASSES = [
+    (8, 0), (8, 0.5), (8, 1), (8, 1.5),
+    (9, 0), (9, 0.5), (9, 1), (9, 1.5),
+    (10, 0), (10, 0.5), (10, 1), (10, 1.5),
+    (11, 0), (11, 0.5), (11, 1), (11, 1.5),
+    (12, 0), (12, 0.5), (12, 1), (12, 1.5),
+    (13, 0), (13, 0.5), (13, 1), (13, 1.5),
+    (14, 0), (14, 0.5), (14, 1), (14, 1.5),
+    (15, 0), (15, 0.5), (15, 1), (15, 1.5),
+]
+
+
+
 
 
 #Configurations of the chess board

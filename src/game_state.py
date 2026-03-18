@@ -17,3 +17,15 @@ def reset_game(board: chess.Board):
     board.reset()
     return None, []  # selected_square, legal_targets
 
+def create_move_with_auto_queen(board: chess.Board, from_sq: chess.Square, to_sq: chess.Square):
+    move = chess.Move(from_sq, to_sq)
+    piece = board.piece_at(from_sq)
+
+    if piece is not None and piece.piece_type == chess.PAWN:
+        target_rank = chess.square_rank(to_sq)
+        if (piece.color == chess.WHITE and target_rank == 7) or (
+            piece.color == chess.BLACK and target_rank == 0
+        ):
+            move = chess.Move(from_sq, to_sq, promotion=chess.QUEEN)
+
+    return move
