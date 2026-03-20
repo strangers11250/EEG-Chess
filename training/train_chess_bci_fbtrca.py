@@ -5,6 +5,7 @@ import pickle
 import re
 import sys
 from collections import OrderedDict
+from typing import Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -23,38 +24,142 @@ def project_root() -> str:
     return os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
 
-def parse_chess_bci_constants(chess_bci_path: str) -> dict:
+def parse_stim_duration_from_legacy(chess_bci_path: str) -> float:
     """
-    Parse a few constants from legacy/chess_bci.py so we can locate its SAVE_DIR
-    without importing pygame/serial-heavy code.
+    Extract STIM_DURATION (seconds) from legacy/chess_bci.py via regex.
+    We avoid importing/exec-ing the chess file.
     """
     with open(chess_bci_path, "r", encoding="utf-8") as f:
         txt = f.read()
 
-    def m(pattern: str, cast):
-        mm = re.search(pattern, txt, flags=re.MULTILINE)
-        if not mm:
-            raise ValueError(f"Missing pattern in {chess_bci_path}: {pattern}")
-        return cast(mm.group(1))
+    m = re.search(r"^\s*STIM_DURATION\s*=\s*([0-9.]+)", txt, flags=re.MULTILINE)
+    if not m:
+        raise ValueError(f"Could not parse STIM_DURATION from {chess_bci_path}")
+    return float(m.group(1))
 
-    stim_type = m(r"^\s*STIM_TYPE\s*=\s*'([^']+)'", str)
-    stim_duration = m(r"^\s*STIM_DURATION\s*=\s*([0-9.]+)", float)
-    subject = m(r"^\s*SUBJECT\s*=\s*(\d+)", int)
-    session = m(r"^\s*SESSION\s*=\s*(\d+)", int)
-    n_per_class = m(r"^\s*N_PER_CLASS\s*=\s*(\d+)", int)
 
-    save_dir = (
-        f"data/chess_bci_{stim_type}-vep_32-class_{stim_duration}s-"
-        f"/sub-{subject:02d}/ses-{session:02d}/"
+def parse_frequency_classes_from_legacy(chess_bci_path: str):
+    """
+    Parse the frequency/phase tuples used by legacy/chess_bci.py.
+
+    chess_bci.py defines:
+      - SSVEP_FREQUENCIES: 32 tuples
+      - EXTENDED_FREQUENCIES = SSVEP_FREQUENCIES + [ ... 32 more tuples ]
+
+    Returns:
+      list[(freq_hz:int, phase_offset_pi:float)] ordered as in legacy code.
+    """
+    with open(chess_bci_path, "r", encoding="utf-8") as f:
+        txt = f.read()
+
+    def extract_tuples(block: str):
+        tuples = re.findall(r"\(\s*([0-9.]+)\s*,\s*([0-9.]+)\s*\)", block)
+        out = []
+        for a, b in tuples:
+            out.append((int(float(a)), float(b)))
+        return out
+
+    # Base list
+    m_base = re.search(r"SSVEP_FREQUENCIES\s*=\s*\[(.*?)\]\s*\n", txt, flags=re.DOTALL)
+    if not m_base:
+        # Fallback: match up to the next "\n\n# ---" comment block.
+        m_base = re.search(r"SSVEP_FREQUENCIES\s*=\s*\[(.*?)\]\s*\n\n#\s*---", txt, flags=re.DOTALL)
+    if not m_base:
+        raise ValueError(f"Could not parse SSVEP_FREQUENCIES from {chess_bci_path}")
+    base_block = m_base.group(1)
+    base_tuples = extract_tuples(base_block)
+
+    # Extended appended list
+    m_ext = re.search(
+        r"EXTENDED_FREQUENCIES\s*=\s*SSVEP_FREQUENCIES\s*\+\s*\[(.*?)\]\s*\n",
+        txt,
+        flags=re.DOTALL,
     )
+    if not m_ext:
+        raise ValueError(f"Could not parse EXTENDED_FREQUENCIES from {chess_bci_path}")
+    ext_block = m_ext.group(1)
+    ext_tuples = extract_tuples(ext_block)
+
+    return base_tuples + ext_tuples
+
+def _parse_dataset_name_components(stem_dir_name: str) -> dict:
+    """
+    Parse dataset metadata from directory name like:
+      chess_bci_alternating-vep_32-class_1.2s-
+    """
+    # Example:
+    # chess_bci_alternating-vep_32-class_1.2s-
+    m = re.match(
+        r"^chess_bci_(?P<stim_type>.+?)-vep_(?P<n_classes>\d+)-class_(?P<stim_duration>[0-9.]+)s-?$",
+        stem_dir_name,
+    )
+    if not m:
+        raise ValueError(f"Unrecognized chess_bci dataset dir name: {stem_dir_name}")
     return {
-        "stim_type": stim_type,
-        "stim_duration": stim_duration,
-        "subject": subject,
-        "session": session,
-        "n_per_class": n_per_class,
-        "save_dir": save_dir,
+        "stim_type": m.group("stim_type"),
+        "n_classes": int(m.group("n_classes")),
+        "stim_duration": float(m.group("stim_duration")),
     }
+
+
+def _parse_subject_session(data_dir: str) -> Tuple[int, int]:
+    """
+    Parse subject/session from .../sub-XX/ses-YY/ .
+    """
+    m_sub = re.search(r"sub-(\d+)", data_dir)
+    m_ses = re.search(r"ses-(\d+)", data_dir)
+    if not (m_sub and m_ses):
+        return (0, 0)
+    return (int(m_sub.group(1)), int(m_ses.group(1)))
+
+
+def _try_parse_meta_from_path(path: str) -> dict:
+    """
+    Try to parse chess_bci dataset metadata from any ancestor folder name.
+    Returns {} if not found / not parseable.
+    """
+    parts = os.path.normpath(path).split(os.sep)
+    for part in parts:
+        if part.startswith("chess_bci_"):
+            try:
+                return _parse_dataset_name_components(part)
+            except Exception:
+                continue
+    return {}
+
+
+def discover_chess_bci_data_dir(
+    data_root: str,
+    preferred_data_dir: Optional[str] = None,
+) -> Tuple[str, dict]:
+    """
+    Auto-discover the chess_bci dataset directory that contains eeg_data.npy.
+    Returns: (data_dir, parsed_metadata_from_dirname)
+    """
+    if preferred_data_dir is not None:
+        data_dir = os.path.abspath(preferred_data_dir)
+        eeg_path = os.path.join(data_dir, "eeg_data.npy")
+        if not os.path.exists(eeg_path):
+            raise FileNotFoundError(f"Missing {eeg_path}")
+        meta = _try_parse_meta_from_path(data_dir)
+        return data_dir, meta
+
+    candidates = glob.glob(os.path.join(data_root, "sub-*", "ses-*"))
+    valid = []
+    for d in candidates:
+        if not os.path.exists(os.path.join(d, "eeg_data.npy")):
+            continue
+        meta = _try_parse_meta_from_path(d)
+        subject, session = _parse_subject_session(d)
+        valid.append((subject, session, d, meta))
+
+    if not valid:
+        raise FileNotFoundError(f"No chess_bci dataset found under {data_root}")
+
+    # Pick the highest (subject, session).
+    valid.sort(key=lambda x: (x[0], x[1]))
+    subject, session, best_dir, best_meta = valid[-1]
+    return best_dir, best_meta
 
 
 def load_chess_bci_dataset(data_dir: str):
@@ -155,7 +260,7 @@ def build_eeg_tensor_for_fbtrca(
     eeg_trials_stim: np.ndarray,
     labels: np.ndarray,
     n_classes: int,
-    expected_n_per_class: int | None,
+    expected_n_per_class,
 ):
     """
     Build eeg tensor shaped:
@@ -175,33 +280,49 @@ def build_eeg_tensor_for_fbtrca(
 
     class_indices = []
     class_counts = []
+    present_class_ids = []
     for c in range(n_classes):
         idx = np.where(labels_folded == c)[0]
         class_indices.append(idx)
-        class_counts.append(len(idx))
+        count_c = len(idx)
+        class_counts.append(count_c)
+        if count_c > 0:
+            present_class_ids.append(c)
 
-    min_count = int(min(class_counts)) if class_counts else 0
+    if not present_class_ids:
+        raise ValueError("No class IDs are present in labels; cannot build training tensor.")
+
+    min_count_present = int(min(class_counts[c] for c in present_class_ids))
     if expected_n_per_class is not None:
-        n_reps = min(min_count, int(expected_n_per_class))
+        n_reps = min(min_count_present, int(expected_n_per_class))
     else:
-        n_reps = min_count
+        n_reps = min_count_present
 
     if n_reps <= 0:
         raise ValueError(
-            f"Not enough data to build per-class repetitions. min_count={min_count}, expected_n_per_class={expected_n_per_class}"
+            "Not enough data to build per-class repetitions "
+            f"(min_count_present={min_count_present}, expected_n_per_class={expected_n_per_class})."
         )
 
     if n_reps < 2:
-        print(f"Warning: only {n_reps} repetition(s) available across all classes; LOO evaluation may be limited.")
+        print(
+            f"Warning: only {n_reps} repetition(s) available for at least one present class; "
+            "LOO evaluation may be limited."
+        )
 
-    eeg_tensor = np.zeros((n_reps, n_classes, n_channels, n_samples), dtype=eeg_trials_stim.dtype)
-    for c in range(n_classes):
-        # Take the first n_reps occurrences for this class.
-        selected_trial_idxs = class_indices[c][:n_reps]
+    # Drop classes that are absent so we don't require min_count across all n_classes.
+    class_ids_used = sorted(present_class_ids)
+    n_classes_eff = len(class_ids_used)
+
+    eeg_tensor = np.zeros(
+        (n_reps, n_classes_eff, n_channels, n_samples), dtype=eeg_trials_stim.dtype
+    )
+    for c_eff, c_orig in enumerate(class_ids_used):
+        selected_trial_idxs = class_indices[c_orig][:n_reps]
         for r in range(n_reps):
-            eeg_tensor[r, c] = eeg_trials_stim[selected_trial_idxs[r]]
+            eeg_tensor[r, c_eff] = eeg_trials_stim[selected_trial_idxs[r]]
 
-    return eeg_tensor, labels_folded, class_counts, n_reps
+    return eeg_tensor, class_ids_used, class_counts, n_reps
 
 
 def train_fbtrca(
@@ -337,6 +458,7 @@ def main():
     parser.add_argument("--seed", type=int, default=64)
     parser.add_argument("--n_classes", type=int, default=None, help="Override number of classes (default: from src/config.py).")
     parser.add_argument("--n_per_class_expected", type=int, default=None, help="Expected repetition per class (default: from labels filename / chess_bci).")
+    parser.add_argument("--stim_duration", type=float, default=None, help="Override stim duration in seconds (default: parsed from data folder name).")
     args = parser.parse_args()
 
     root_dir = project_root()
@@ -349,30 +471,43 @@ def main():
         BASELINE_DURATION,
         SAMPLING_RATE,
         STIM_DURATION,
-        SSVEP_CLASSES,
     )
 
-    chess_bci_path = os.path.join(root_dir, "legacy", "chess_bci.py")
-    if not os.path.exists(chess_bci_path):
-        raise FileNotFoundError(f"Cannot find {chess_bci_path}")
-
-    chess_consts = parse_chess_bci_constants(chess_bci_path)
-    default_data_dir = os.path.join(root_dir, chess_consts["save_dir"])
-
-    data_dir = args.data_dir if args.data_dir is not None else default_data_dir
+    data_root = os.path.join(root_dir, "data")
+    data_dir, discovered_meta = discover_chess_bci_data_dir(
+        data_root=data_root,
+        preferred_data_dir=args.data_dir,
+    )
     if not os.path.exists(data_dir):
         raise FileNotFoundError(f"data_dir does not exist: {data_dir}")
 
     model_save_path = args.model_save_path if args.model_save_path is not None else os.path.join(root_dir, MODEL_PATH)
 
-    n_classes = args.n_classes if args.n_classes is not None else int(CFG_N_CLASSES)
+    legacy_chess_bci_path = os.path.join(root_dir, "legacy", "chess_bci.py")
+    stimulus_classes_all = parse_frequency_classes_from_legacy(legacy_chess_bci_path)
+    n_classes_total = (
+        args.n_classes
+        if args.n_classes is not None
+        else len(stimulus_classes_all)
+    )
     n_channels_expected = int(CFG_N_CHANNELS)
     sampling_rate = int(SAMPLING_RATE)
-    stim_duration = float(chess_consts["stim_duration"])
+    if args.stim_duration is not None:
+        stim_duration = float(args.stim_duration)
+    else:
+        discovered_stim_duration = discovered_meta.get("stim_duration")
+        if discovered_stim_duration is not None:
+            stim_duration = float(discovered_stim_duration)
+        else:
+            stim_duration = parse_stim_duration_from_legacy(legacy_chess_bci_path)
 
-    if len(SSVEP_CLASSES) < n_classes:
-        raise ValueError(f"src/config.py only defines {len(SSVEP_CLASSES)} SSVEP_CLASSES, but --n_classes={n_classes}.")
-    stimulus_classes = SSVEP_CLASSES[:n_classes]
+    # If you override n_classes_total, slice the frequency table accordingly.
+    if n_classes_total > len(stimulus_classes_all):
+        raise ValueError(
+            f"--n_classes={n_classes_total} exceeds the number of classes parsed from legacy/chess_bci.py "
+            f"({len(stimulus_classes_all)})."
+        )
+    stimulus_classes_total = stimulus_classes_all[:n_classes_total]
 
     eeg_data, labels, labels_path = load_chess_bci_dataset(data_dir)
 
@@ -387,7 +522,9 @@ def main():
         if m:
             expected_n_per_class = int(m.group(1))
         else:
-            expected_n_per_class = chess_consts["n_per_class"]
+            # Fallback: chess_bci.py uses N_PER_CLASS=2 by default.
+            expected_n_per_class = 2
+            print("Warning: could not infer n_per_class from labels filename; using 2.")
 
     eeg_trials_stim, meta = segment_trials_from_concatenated_eeg(
         eeg_data=eeg_data,
@@ -405,21 +542,25 @@ def main():
     print(f"  baseline_samples_used: {meta['baseline_samples_used']}")
     print(f"  stim_samples: {meta['stim_samples']}")
 
-    eeg_tensor, labels_folded, class_counts, n_reps = build_eeg_tensor_for_fbtrca(
+    eeg_tensor, class_ids_used, class_counts, n_reps = build_eeg_tensor_for_fbtrca(
         eeg_trials_stim=eeg_trials_stim,
         labels=labels,
-        n_classes=n_classes,
+        n_classes=n_classes_total,
         expected_n_per_class=expected_n_per_class,
     )
 
     print("Per-class availability:")
     print(f"  expected_n_per_class: {expected_n_per_class}")
     print(f"  n_reps_used: {n_reps}")
-    print(f"  min_count_across_classes: {int(min(class_counts))}")
+    present_counts = [class_counts[c] for c in class_ids_used]
+    print(f"  n_classes_eff: {len(class_ids_used)}")
+    print(f"  min_count_present: {int(min(present_counts))}")
+
+    stimulus_classes_eff = [stimulus_classes_total[cid] for cid in class_ids_used]
 
     train_fbtrca(
         eeg_tensor=eeg_tensor,
-        stimulus_classes=stimulus_classes,
+        stimulus_classes=stimulus_classes_eff,
         sampling_rate=sampling_rate,
         stim_duration=stim_duration,
         model_save_path=model_save_path,

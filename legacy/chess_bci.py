@@ -9,7 +9,6 @@ from scipy import signal
 from typing import Optional
 from threading import Thread, Event
 from queue import Queue
-import pickle
 
 # Optional BCI imports - will work without them if not available
 try:
@@ -18,7 +17,7 @@ try:
     import glob
     import mne
     BCI_AVAILABLE = True
-except ImportError:
+except:
     BCI_AVAILABLE = False
     print("Warning: BCI libraries not available. Running in simulation mode.")
 
@@ -53,7 +52,7 @@ EXTENDED_FREQUENCIES = SSVEP_FREQUENCIES + [
 ]
 
 # BCI Configuration
-CYTON_IN = True  # Set to True to enable BCI data collection
+CYTON_IN = False  # Set to True to enable BCI data collection
 CYTON_BOARD_ID = 0
 BAUD_RATE = 115200
 ANALOGUE_MODE = '/2'
@@ -61,14 +60,14 @@ SAMPLING_RATE = 250 if BCI_AVAILABLE else 250
 N_PER_CLASS = 2
 REFRESH_RATE = 60.0  # Monitor refresh rate (adjust to your monitor)
 STIM_DURATION = 1.2  # Duration of each SSVEP trial in seconds
-COUNTDOWN_TIME = 3.0
+COUNTDOWN_TIME = 10
 STIM_TYPE = 'alternating'  # 'alternating' for SSVEP
 RUN_ID = 1
 SUBJECT = 1
 SESSION = 2
 CALIBRATION_MODE = True
 AUTO_SSVEP_ENABLED = True
-CALIBRATION_CUE_LEAD_TIME = 0.7  # Seconds cue is shown before SSVEP starts
+CALIBRATION_CUE_LEAD_TIME = 2  # Seconds cue is shown before SSVEP starts
 SAVE_DIR = f'data/chess_bci_{STIM_TYPE}-vep_32-class_{STIM_DURATION}s-/sub-{SUBJECT:02d}/ses-{SESSION:02d}/'
 SAVE_FILE_EEG = SAVE_DIR + f'eeg_{N_PER_CLASS}-per-class_run-{RUN_ID}.npy'
 SAVE_FILE_TIMESTAMP = SAVE_DIR + f'timestamp_{N_PER_CLASS}-per-class_run-{RUN_ID}.npy'
