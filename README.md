@@ -50,7 +50,7 @@ A rough timeline to check-in with Professor/TAs.
 
 - **Tech stack**
   - Programming language: Python 
-  - EEG libraries / tools: SSVEP with LDA in EEGLAB.
+  - EEG libraries / tools: SSVEP with LDA in EEGLAB, use of TRCA
   - Chess engine / UI: python-chess, pygame
 
 - **Data, ethics, and safety**
